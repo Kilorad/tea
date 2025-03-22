@@ -6,6 +6,50 @@ import torch.nn.functional as F
 import torch
 import random
 
+class MemLayer(nn.Module):
+    def __init__(self, input_size, output_size, num_heads, query_size, num_key_values, value_size):
+        super(MemLayer, self).__init__()
+        
+        self.input_size = input_size
+        self.output_size = output_size
+        self.num_heads = num_heads
+        self.query_size = query_size
+        self.num_key_values = num_key_values
+        self.value_size = value_size
+
+        # Обучаемые ключи и значения
+        self.keys = nn.Parameter(torch.randn(num_key_values, query_size))
+        self.values = nn.Parameter(torch.randn(num_key_values, value_size))
+
+        # Обучаемые параметры для запросов
+        self.query_linear = nn.Linear(input_size, num_heads * query_size, bias=False)
+        self.out_linear = nn.Linear(num_heads * value_size, output_size, bias=False)
+
+    def forward(self, x):
+        batch_size = x.size(0)
+
+        # Генерация запросов
+        queries = self.query_linear(x).view(batch_size, self.num_heads, self.query_size)
+
+        # Вычисление внимания
+        keys = self.keys.unsqueeze(0).expand(batch_size, -1, -1).view(batch_size, self.num_key_values, self.query_size)  # (batch_size, num_key_values, query_size)
+        values = self.values.unsqueeze(0).expand(batch_size, -1, -1).view(batch_size, self.num_key_values, self.value_size)  # (batch_size, num_key_values, value_size)
+        # Перемножение с использованием операций
+        scores = torch.einsum('aib,ajb->aijb', queries, keys) / (self.query_size ** 0.5)
+        # Применяем softmax для весов
+        scores = torch.sum(scores, axis=-1)
+        attn_weights = F.softmax(scores, dim=-1)  # (batch_size, num_heads, num_key_values)
+
+        # Взвешивание значений
+        output_values = torch.einsum('aib,ajc->aijc',attn_weights, values)  # (batch_size, num_heads, value_size)
+        output_values = torch.mean(output_values, axis=2)
+        # Объединение голов
+        output_values = output_values.view(batch_size, -1)  # (batch_size, num_heads * value_size)
+        output_values = self.out_linear(output_values)
+        
+        return output_values + x
+        
+
 class ResNet(nn.Module):
     def __init__(self, input_size, out_size, dropout_rate, layer_configs=None, use_sigmoid_end=True, use_bathcnorm=True, use_activation=True, activation=nn.ReLU()):
         super().__init__()
@@ -91,14 +135,104 @@ class ResNet(nn.Module):
             i += 1
         return X
 
+class ResMemNet(nn.Module):
+    def __init__(self, input_size, out_size, dropout_rate, layer_configs=None, use_sigmoid_end=True, use_bathcnorm=True, use_activation=True, activation=nn.ReLU(), num_heads=4, query_size=64, num_key_values=128, value_size=256):
+        super().__init__()
+        self.dropout_rate = dropout_rate
+        self.layers = nn.ModuleList()
+        out_sz = input_size
+        for hidden_sz in layer_configs:
+            in_sz = out_sz
+            out_sz = hidden_sz
+            self.layers.append(nn.Linear(in_sz, out_sz))
+            with torch.no_grad():
+                self.layers[-1].weight *= 0.00001
+                self.layers[-1].bias *= 0.00001
+            self.layers.append(activation)
+            self.layers.append(MemLayer(out_sz, out_sz, num_heads=num_heads, query_size=query_size, value_size=value_size, num_key_values=num_key_values))
+            with torch.no_grad():
+                self.layers[-1].out_linear.weight *= 0.001
+            self.layers.append(nn.Dropout(p=self.dropout_rate))
+            self.layers.append(nn.LayerNorm(out_sz))
+        
+        if len(layer_configs) > 0:
+            in_sz = sum(layer_configs)
+        else:
+            in_sz = out_sz
+        out_sz = out_size
+        self.layers.append(nn.Linear(in_sz, out_sz))
+        with torch.no_grad():
+            self.layers[-1].weight *= 0.00001
+            self.layers[-1].bias *= 0.00001
+        self.layers.append(nn.Dropout(p=self.dropout_rate))
+        self.layers.append(nn.LayerNorm(out_sz))
+        self.layers.append(nn.Sigmoid())
+        
+        self.out_size = out_size
+        self.use_sigmoid_end = use_sigmoid_end
+        self.use_batchnorm = use_bathcnorm
+        self.use_activation = use_activation
+        
+        self.activation = activation
+        
+    def forward(self, X):
+        #X = torch.tensor(X, dtype=torch.float16)
+        concat_result = []
+        i = 0
+        for l in self.layers[:-4]:
+            if not self.use_batchnorm and ('LayerNorm' in str(l)):
+                concat_result.append(X)
+                continue
+            if not self.use_activation and (str(self.activation) in str(l)):
+                continue    
+            if ('LayerNorm' in str(l)) and (len(X.shape) == 3):
+                shp = X.shape
+                X = X.view([shp[0], shp[1] * shp[2]])
+                if l._parameters['weight'].shape[0] != X.shape[-1]:
+                    self.layers[i] = nn.LayerNorm(X.shape[-1], device=X.device)
+                    l = self.layers[i]
+                X = l(X)
+                X = X.view([shp[0], shp[1], shp[2]])
+            else:
+                X = l(X)
+            if 'LayerNorm' in str(l):
+                concat_result.append(X)
+            i += 1
+        if len(X.shape) == 2:
+            X = torch.hstack(concat_result)
+        else:
+            X = torch.dstack(concat_result)
+        
+        for l in self.layers[-4:]:
+            if not self.use_activation and (str(self.activation) in str(l)):
+                continue
+            if not self.use_batchnorm and ('LayerNorm' in str(l)):
+                continue
+            if ('Sigmoid' in str(l)) and (not self.use_sigmoid_end):
+                break
+            if ('LayerNorm' in str(l)) and (len(X.shape) == 3):
+                shp = X.shape
+                X = X.view([shp[0], shp[1] * shp[2]])
+                if l._parameters['weight'].shape[0] != X.shape[-1]:
+                    self.layers[i] = nn.LayerNorm(X.shape[-1], device=X.device)
+                    l = self.layers[i]
+                X = l(X)
+                X = X.view([shp[0], shp[1], shp[2]])
+            else:
+                X = l(X)
+            i += 1
+        return X
+
+
 class EResNetPro(nn.Module):
     '''
     Вероятностная композиция резнетов. Примечательна тем, что
     1) резнеты разные (их гиперы выбираются из распределения, где большие слои идут с меньшей вероятностью)
     2) иная форма дропаута. Выбрасываются некоторые из резнетов целиком
     '''
-    def __init__(self, input_size, out_size, net_dropout_rate, individ_dropout_rate, layer_configs=None, use_sigmoid_end=True, use_batchnorm=True, use_activation=True, activation=nn.ReLU(), sample_features=0.9, composition_size=200, feature_name: str = "features_vec", lin_bottleneck_size=None, lin_model_add=None):
-        '''теперь мы задаём матожидание размера слоя, а не его фактический размер'''
+    def __init__(self, input_size, out_size, net_dropout_rate, individ_dropout_rate, layer_configs=None, use_sigmoid_end=True, use_batchnorm=True, use_activation=True, activation=nn.ReLU(), sample_features=0.9, composition_size=200, feature_name: str = "features_vec", lin_bottleneck_size=None, lin_model_add=None, use_memnets=False, memnet_params={}):
+        '''теперь мы задаём матожидание размера слоя, а не его фактический размер
+        memnet_params={'num_heads', 'query_size', 'num_key_values', 'value_size'}'''
         super().__init__()
         torch.manual_seed(1)
         np.random.seed(1)
@@ -109,6 +243,8 @@ class EResNetPro(nn.Module):
         self.individ_dropout = individ_dropout_rate
         self.lin_bottleneck_size = lin_bottleneck_size
         self.lin_model_add = lin_model_add
+        self.use_memnets = use_memnets
+        self.memnet_params = memnet_params
         
         self.input_size_sampled = min(int(sample_features * input_size) + 1, input_size)
         
@@ -122,7 +258,12 @@ class EResNetPro(nn.Module):
                 if value < 3:
                     value = 3
                 layer_configs_current.append(value)
-            self.submodels.append(ResNet(self.input_size_sampled, out_size, self.individ_dropout, layer_configs_current, False, use_batchnorm, use_activation, activation))
+            print('use_memnets', self.use_memnets)
+            if self.use_memnets:
+                self.submodels.append(ResMemNet(self.input_size_sampled, out_size, self.individ_dropout, layer_configs_current, False, use_batchnorm, use_activation, activation, num_heads=self.memnet_params['num_heads'], query_size=self.memnet_params['query_size'], num_key_values=self.memnet_params['num_key_values'], value_size=self.memnet_params['value_size']))
+            else:
+                self.submodels.append(ResNet(self.input_size_sampled, out_size, self.individ_dropout, layer_configs_current, False, use_batchnorm, use_activation, activation))
+                
             features_set = list(range(input_size))
             features_set = random.sample(features_set, self.input_size_sampled)
             self.submodels[-1].features = features_set
