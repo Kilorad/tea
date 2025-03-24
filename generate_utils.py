@@ -192,7 +192,7 @@ def generate_speculative(model, input_ids, heavy_lm_head=None, slider=None, max_
                             idx_bad = torch.where(~estimated_token_good_bycolumns)[0][0]
                             offset = autoregression_step - idx_bad - 1
                             generated_sequence = generated_sequence[:, :-offset]
-                            debug_report['len_generated'] -= offset
+                            debug_report['len_generated'] -= offset.item()
                             #очистить буфер и поместить в него токены, полученные из проверочных логитов для прошлого
                             buffer_tokens = torch.hstack([tokens_past_fixed, next_tokens[:, :1]])
                 #пора ли прекращать генерить
@@ -211,7 +211,7 @@ def generate_speculative(model, input_ids, heavy_lm_head=None, slider=None, max_
                 #в буфере что-то есть - берём!
                 # Добавляем новые токены к сгенерированной последовательности
                 generated_sequence = torch.cat([generated_sequence, buffer_tokens], dim=1)
-                debug_report['len_generated'] += buffer_tokens.shape[1].item()
+                debug_report['len_generated'] += buffer_tokens.shape[1]
                 buffer_tokens = []
     
             first_iter = False
