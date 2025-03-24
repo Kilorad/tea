@@ -22,12 +22,13 @@ def logit2token(logits, top_p=0.9, temperature=1.0, do_sample=True, top_k=50, re
     'precise' (tokens, made by .forward should be eqivalent to tokens, made by normal generate)
     'acceptable' (token is not forbidden by top_k, top_p, if normal generate started)
     'mean' (token has probability more than average, among non-forbidden by top_k, top_p)
-    '0.2' (token has probability more than 20% quantile, among non-forbidden by top_k, top_p)
+    '0.3' (token has probability more than 30% quantile, among non-forbidden by top_k, top_p)
     '''
     lshape = logits.shape
     if len(lshape) == 3:
         logits = logits.reshape([lshape[0] * lshape[1], lshape[2]])
-        estimate_token = estimate_token.reshape([lshape[0] * lshape[1]])
+        if estimate_token is not None:
+            estimate_token = estimate_token.reshape([lshape[0] * lshape[1]])
 
     estimated_token_good = torch.ones(logits.shape[0], device=logits.device)
     # Применяем temperature
@@ -73,10 +74,10 @@ def logit2token(logits, top_p=0.9, temperature=1.0, do_sample=True, top_k=50, re
                     idx = logits[i] > float('-inf')
                     estimated_token_good[i] = (logits[i,estimate_token[i]] > torch.mean(logits[i, idx])).to(torch.int16)
                     
-                if estimation_rule == '0.2':
+                if estimation_rule == '0.3':
                     idx = logits[i] > float('-inf')
-                    estimated_token_good[i] = (logits[i,estimate_token[i]] > torch.quantile(logits[i, idx].to(torch.float32), 0.2)).to(torch.int16)
-
+                    estimated_token_good[i] = (logits[i,estimate_token[i]] > torch.quantile(logits[i, idx].to(torch.float32), 0.3)).to(torch.int16)
+            
             # Нормализуем вероятности
             probs = F.softmax(logits, dim=-1)
 
@@ -94,8 +95,9 @@ def logit2token(logits, top_p=0.9, temperature=1.0, do_sample=True, top_k=50, re
 
         if len(lshape) == 3:
             next_token = next_token.reshape([lshape[0], lshape[1]])
-            estimated_token_good = estimated_token_good.reshape([lshape[0], lshape[1]])
-            estimate_token = estimate_token.reshape([lshape[0], lshape[1]])
+            if estimate_token is not None:
+                estimated_token_good = estimated_token_good.reshape([lshape[0], lshape[1]])
+                estimate_token = estimate_token.reshape([lshape[0], lshape[1]])
         return next_token, estimated_token_good
 
 
@@ -104,7 +106,7 @@ def generate_speculative(model, input_ids, heavy_lm_head=None, slider=None, max_
              do_sample=True, repetition_penalty=1.0, early_stopping=False, 
              tokenizer=None, stop_strings=None, 
              return_dict_in_generate=False, use_cache=True, slider_window=100, 
-             autoregression_step=3, filler=None, estimation_rule='mean'):
+             autoregression_step=3, filler=None, estimation_rule='mean', debug=False):
     '''speculative generation
     2 main ideas:
     1) You can change everything by your sly hands. This is much simplier than in normal .generate.
@@ -123,7 +125,7 @@ def generate_speculative(model, input_ids, heavy_lm_head=None, slider=None, max_
     'precise' (tokens, made by .forward should be eqivalent to tokens, made by normal generate)
     'acceptable' (token is not forbidden by top_k, top_p, if normal generate started)
     'mean' (token has probability more than average, among non-forbidden by top_k, top_p)
-    '0.2' (token has probability more than 20% quantile, among non-forbidden by top_k, top_p)
+    '0.3' (token has probability more than 30% quantile, among non-forbidden by top_k, top_p)
     '''
     #estimation_rule = 'precise' (точное совпадение) или 'acceptable' (не нулевая вероятность) или 'mean' (> среднего)
     if filler is None:
@@ -149,11 +151,15 @@ def generate_speculative(model, input_ids, heavy_lm_head=None, slider=None, max_
         first_iter = True
         #for _ in range(max_new_tokens):
         factial_iterations_cnt = 0
+        debug_report = {'iterations':0,'len_generated':0}
         while 1:
             if len(buffer_tokens) == 0:
                 factial_iterations_cnt += 1
                 #в буфере ничего нет - генерим!
-                generated_sequence_w_paddings = torch.hstack([generated_sequence, torch.zeros([generated_sequence.shape[0], autoregression_step - 1], device=generated_sequence.device, dtype=torch.int64) + filler])
+                if autoregression_step > 1:
+                    generated_sequence_w_paddings = torch.hstack([generated_sequence, torch.zeros([generated_sequence.shape[0], autoregression_step - 1], device=generated_sequence.device, dtype=torch.int64) + filler])
+                else:
+                    generated_sequence_w_paddings = torch.hstack([generated_sequence])
                 outp = model.forward(generated_sequence_w_paddings, output_hidden_states=True, return_dict=True, use_cache=use_cache, output_scores=False, output_logits=False, past_key_values=None)
                 embeddings = outp['hidden_states'][-1].detach()
         
@@ -167,51 +173,52 @@ def generate_speculative(model, input_ids, heavy_lm_head=None, slider=None, max_
                 if heavy_lm_head is not None:
                     logits = heavy_lm_head(embeddings_af_slider[:, -2 * autoregression_step:, :])
                 else:
-                     logits = model.lm_head(embeddings_af_slider[:, -2 * autoregression_step:, :])
-                logits_future = logits[:, -autoregression_step]
+                    logits = model.lm_head(embeddings_af_slider[:, -2 * autoregression_step:, :])
+                logits_future = logits[:, -autoregression_step:]
                 if not first_iter:
                     logits_past = logits[:, -autoregression_step * 2 + 1: -autoregression_step]
 
                 #del logits
-                next_token, _ = logit2token(logits_future, top_p=top_p, temperature=temperature, do_sample=do_sample, top_k=top_k, repetition_penalty=repetition_penalty, generated_sequence=generated_sequence, estimate_token=None, estimation_rule=None)
-                buffer_tokens = next_token
+                next_tokens, _ = logit2token(logits_future, top_p=top_p, temperature=temperature, do_sample=do_sample, top_k=top_k, repetition_penalty=repetition_penalty, generated_sequence=generated_sequence, estimate_token=None, estimation_rule=None)
+                buffer_tokens = next_tokens
                 #проверить, правда ли недавно сгенерённые токены хороши
                 if not first_iter:
-                    tokens_past_fixed, estimated_token_good = logit2token(logits_past, top_p=top_p, temperature=temperature, do_sample=do_sample, top_k=top_k, repetition_penalty=repetition_penalty, generated_sequence=generated_sequence[:, :-autoregression_step + 1], estimate_token=generated_sequence[:, -autoregression_step + 1:], estimation_rule=estimation_rule)
-                    estimated_token_good = torch.all(estimated_token_good, axis=1)
-                    if torch.any(~estimated_token_good):
-                        #отбросить токены, которые "не good"
-                        idx_bad = torch.where(~estimated_token_good)[0]
-                        offset = autoregression_step - idx_bad - 1
-                        generated_sequence = generated_sequence[:, :-offset]
-                        #очистить буфер и поместить в него токены, полученные из проверочных логитов для прошлого
-                        buffer_tokens = tokens_past_fixed
+                    position_start_check = max(generated_sequence.shape[1] - autoregression_step + 1, input_ids.shape[1])
+                    if position_start_check > input_ids.shape[1]:
+                        tokens_past_fixed, estimated_token_good = logit2token(logits_past, top_p=top_p, temperature=temperature, do_sample=do_sample, top_k=top_k, repetition_penalty=repetition_penalty, generated_sequence=generated_sequence[:, :], estimate_token=generated_sequence[:, position_start_check:], estimation_rule=estimation_rule)
+                        estimated_token_good_bycolumns = torch.all(estimated_token_good, axis=0)
+                        if torch.any(~estimated_token_good_bycolumns):
+                            #отбросить токены, которые "не good". У нас в разных строках может быть по-разному, мы режем по самой короткой строке
+                            idx_bad = torch.where(~estimated_token_good_bycolumns)[0][0]
+                            offset = autoregression_step - idx_bad - 1
+                            generated_sequence = generated_sequence[:, :-offset]
+                            debug_report['len_generated'] -= offset
+                            #очистить буфер и поместить в него токены, полученные из проверочных логитов для прошлого
+                            buffer_tokens = torch.hstack([tokens_past_fixed, next_tokens[:, :1]])
                 #пора ли прекращать генерить
                 if (generated_sequence.shape[1] >= max_new_tokens + input_ids.shape[1]):
                     break
                 # Проверка на EOS токен
                 if eos_token_id is not None and eos_token_id in generated_sequence:
                     break
-                    
                 # Проверка на стоп-строки
                 if stop_strings is not None:
                     generated_text = tokenizer.decode(generated_sequence[0], skip_special_tokens=True)
                     if any(stop_str in generated_text for stop_str in stop_strings):
                         break
             else:
+                debug_report['iterations'] += 1
                 #в буфере что-то есть - берём!
-                next_token = buffer_tokens[:, :1]
-                if buffer_tokens.shape[1] > 1:
-                    buffer_tokens = buffer_tokens[:, 1:]
-                else:
-                    buffer_tokens = []
-            
-            # Добавляем новый токен к сгенерированной последовательности
-            generated_sequence = torch.cat([generated_sequence, next_token], dim=1)
+                # Добавляем новые токены к сгенерированной последовательности
+                generated_sequence = torch.cat([generated_sequence, buffer_tokens], dim=1)
+                debug_report['len_generated'] += buffer_tokens.shape[1].item()
+                buffer_tokens = []
     
             first_iter = False
     generated_sequence = generated_sequence[:, input_ids.shape[1]:]
-    #print('factial_iterations_cnt', factial_iterations_cnt, 'max_new_tokens', max_new_tokens)
+    if debug:
+        debug_report['avg_tokens_generated_count'] = (debug_report['len_generated'] + 0.)/debug_report['iterations']
+        print(debug_report)
     # Возвращаем сгенерированную последовательность
     if return_dict_in_generate:
         return {"generated_sequence": generated_sequence, "scores": logits}
