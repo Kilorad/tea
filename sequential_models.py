@@ -158,7 +158,11 @@ class GPTAdapterLayer(nn.Module):
                                           use_cache=use_cache,
                                           cache_position=cache_position,
                                           position_embeddings=position_embeddings)
-        out_original_tns, out_original_cache = out_original
+        out_original_tns = out_original[0]
+        if len(out_original) == 2:
+            out_original_cache = out_original[1]
+        else:
+            out_original_cache = None
         del out_original
         if self.transformer_float_mode == 32:
             x = x.to(torch.float32)
