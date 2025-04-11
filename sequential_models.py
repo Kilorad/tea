@@ -45,7 +45,7 @@ class FlashAttention(nn.Module):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
-        assert self.head_dim * num_heads == embed_dim, "Embed dim must be divisible by num_heads"
+        assert self.head_dim * num_heads == embed_dim
         
         self.qkv_proj = nn.Linear(embed_dim, 3*embed_dim, bias=False)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=False)
@@ -54,25 +54,29 @@ class FlashAttention(nn.Module):
 
     def forward(self, x: Tensor):
         B, T, _ = x.size()
+        
+        # Автоматическое создание causal mask
+        causal_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=x.device), diagonal=1)
+        
         qkv = self.qkv_proj(x).split(self.embed_dim, dim=2)
-        
-        q, k, v = [y.view(B, T, self.num_heads, self.head_dim).transpose(1, 2) 
-                  for y in qkv]
-        
+        q, k, v = [y.view(B, T, self.num_heads, self.head_dim).transpose(1, 2) for y in qkv]
+
         if hasattr(F, 'scaled_dot_product_attention'):
             attn_output = F.scaled_dot_product_attention(
                 q, k, v,
+                attn_mask=causal_mask,  # Автоматическая маска
                 dropout_p=self.dropout if self.training else 0,
-                scale=self.scale
+                scale=self.scale,
+                is_causal=True,  # Оптимизация для Flash Attention
             )
         else:
-            # Fallback для старых версий PyTorch
             attn = (q @ k.transpose(-2, -1)) * self.scale
+            attn = attn.masked_fill(causal_mask, float('-inf'))
             attn = attn.softmax(dim=-1)
             if self.training:
                 attn = F.dropout(attn, p=self.dropout)
             attn_output = attn @ v
-        
+
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, -1)
         return self.out_proj(attn_output)
 
