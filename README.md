@@ -74,3 +74,6 @@ print(pd.Timestamp.now() - t)
 answer = tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
 print(answer)
 ```
+
+Апдейт от 20.04
+Встроил адаптер, который сочетает трансформерные слои и резнеты. Трансформерные слои позволяют сделать более репрезентативные эмбеддинги под нашу задачу. Подробности см в tea_transformer_heavyhead.ipynb

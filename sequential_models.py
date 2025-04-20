@@ -129,6 +129,7 @@ class GPTAdapterLayer(nn.Module):
         self.conservativity = conservativity
         self.corrector_stack = torch.nn.ModuleList([])
         self.t_layers_count = t_layers_count
+        #При обучении ставим оба в 32, при инференсе оба в 16
         self.transformer_float_mode = 32
         self.lmhead_float_mode = 16
         for i in range(t_layers_count):
@@ -173,11 +174,13 @@ class GPTAdapterLayer(nn.Module):
             out_original_tns =  out_original_tns.to(torch.float32)
         for i in range(self.t_layers_count):
             corrector_block = self.corrector_stack[i]
-            x = corrector_block[0](x) + x
-            x = corrector_block[1](x) + x
+            x = x + corrector_block[0](x)  # Трансформер
+            x = x + corrector_block[1](x)  # ResNet
         x = out_original_tns + x * self.conservativity
         if self.lmhead_float_mode == 16:
             x = x.to(torch.float16)
         else:
-            x = x.to(torch.float32)
+            if x.dtype == torch.float16:
+                #иначе порвём градиент
+                x = x.to(torch.float32)
         return (x, out_original_cache)

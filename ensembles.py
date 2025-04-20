@@ -230,7 +230,7 @@ class EResNetPro(nn.Module):
     1) резнеты разные (их гиперы выбираются из распределения, где большие слои идут с меньшей вероятностью)
     2) иная форма дропаута. Выбрасываются некоторые из резнетов целиком
     '''
-    def __init__(self, input_size, out_size, net_dropout_rate, individ_dropout_rate, layer_configs=None, use_sigmoid_end=True, use_batchnorm=True, use_activation=True, activation=nn.ReLU(), sample_features=0.9, composition_size=200, feature_name: str = "features_vec", lin_bottleneck_size=None, lin_model_add=None, use_memnets=False, memnet_params={}):
+    def __init__(self, input_size, out_size, net_dropout_rate, individ_dropout_rate, layer_configs=None, use_sigmoid_end=True, use_batchnorm=True, use_activation=True, activation=nn.ReLU(), sample_features=0.9, composition_size=200, feature_name: str = "features_vec", lin_bottleneck_size=None, lin_model_add=None, use_memnets=False, memnet_params={}, max_batch_size=1024 * 10, aggregation_by_mean=True):
         '''теперь мы задаём матожидание размера слоя, а не его фактический размер
         memnet_params={'num_heads', 'query_size', 'num_key_values', 'value_size'}'''
         super().__init__()
@@ -245,11 +245,15 @@ class EResNetPro(nn.Module):
         self.lin_model_add = lin_model_add
         self.use_memnets = use_memnets
         self.memnet_params = memnet_params
+        #aggregation_by_mean обычно надо ставить в true - это логика равноценного бустинга или RF
+        #но можно и в false - тогда легче получить ситуацию, что в параллель есть основная модель и вспомогательная
+        self.aggregation_by_mean = aggregation_by_mean
         
         self.input_size_sampled = min(int(sample_features * input_size) + 1, input_size)
         
         self.submodels = nn.ModuleList()
         self.by_submodels = False
+        self.max_batch_size = max_batch_size
         
         for i in range(composition_size):
             layer_configs_current = []
@@ -285,7 +289,14 @@ class EResNetPro(nn.Module):
         self.composition_size = composition_size
         self.output_dimension = out_size
         self.feature_name = feature_name
+
     def forward(self, X):
+        Y = []
+        for batch_start in range(0, X.shape[0], self.max_batch_size):
+            Y += [self.forward_batch(X[batch_start : batch_start + self.max_batch_size])]
+        Y = torch.vstack(Y)
+        return Y
+    def forward_batch(self, X):
         composition_size_effective = self.composition_size
         if self.training:
             if self.net_dropout <=0:
@@ -323,7 +334,10 @@ class EResNetPro(nn.Module):
                 if self.by_submodels:
                     Y_lst += [Y.clone()]
             else:
-                Y_add = self.submodels[i](X[:, features_set]) / self.composition_size
+                if self.aggregation_by_mean:
+                    Y_add = self.submodels[i](X[:, features_set]) / self.composition_size
+                else:
+                    Y_add = self.submodels[i](X[:, features_set])
                 Y += Y_add
                 if self.by_submodels:
                     Y_lst += [Y_add.clone()]
