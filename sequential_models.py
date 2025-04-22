@@ -81,7 +81,7 @@ class FlashAttention(nn.Module):
         return self.out_proj(attn_output)
 
 class GPTLayer(nn.Module):
-    def __init__(self, dim: int, num_heads: int, ff_dim: int, dropout: float = 0.1):
+    def __init__(self, dim: int, num_heads: int, ff_dim: int, dropout: float = 0.1, conservativity = 0.0001):
         super().__init__()
         self.norm1 = RMSNorm(dim)
         self.attn = FlashAttention(dim, num_heads, dropout)
@@ -91,12 +91,17 @@ class GPTLayer(nn.Module):
         self.ffn = SwiGLUFFN(dim, ff_dim, dropout)
         self.dropout2 = nn.Dropout(dropout)
 
+        self.final_projection = nn.Linear(dim, dim, dropout)
+        with torch.no_grad():
+            self.final_projection.weight *= conservativity
+            self.final_projection.bias *= conservativity
+
     def forward(self, x: Tensor):
         # Attention block
         x = x + self.dropout1(self.attn(self.norm1(x)))
         # FFN block
         x = x + self.dropout2(self.ffn(self.norm2(x)))
-        return x
+        return self.final_projection(x)
         
 # Тестирование слоя
 def test_layer():
@@ -123,7 +128,8 @@ def test_layer():
 
 class GPTAdapterLayer(nn.Module):
     def __init__(self, initial_layer, dim: int, num_heads: int, ff_dim: int, dropout: float = 0.1, conservativity: float = 0.01, t_layers_count = 2,
-                net_dropout_rate:float = 0, layer_configs=[2048, 2048], memnet_params={'num_heads':6, 'query_size':64, 'num_key_values':128, 'value_size':256}):
+                net_dropout_rate:float = 0, layer_configs=[2048, 2048], memnet_params={'num_heads':6, 'query_size':64, 'num_key_values':128, 'value_size':256}, composition_type='parallel'):
+        #composition_type='parallel' or 'stack'
         super().__init__()
         self.initial_layer = initial_layer
         self.conservativity = conservativity
@@ -131,13 +137,15 @@ class GPTAdapterLayer(nn.Module):
         self.t_layers_count = t_layers_count
         self.transformer_float_mode = 32
         self.lmhead_float_mode = 16
+        self.composition_type = composition_type
         for i in range(t_layers_count):
             corrector_block = torch.nn.ModuleList([])
             corrector_block += [GPTLayer(
                 dim,
                 num_heads,
                 ff_dim,
-                dropout
+                dropout,
+                conservativity
             )]
             corrector_block += [ensembles.EResNetPro(input_size=dim, 
                    out_size=dim, 
@@ -153,31 +161,39 @@ class GPTAdapterLayer(nn.Module):
                    memnet_params=memnet_params,
                    use_memnets=True)]
             self.corrector_stack += [corrector_block]
-    def forward(self, x: Tensor, attention_mask:Tensor, position_ids:Tensor, past_key_value, output_attentions, use_cache, cache_position, position_embeddings):
-        out_original = self.initial_layer(x, 
-                                          attention_mask=attention_mask, 
-                                          position_ids=position_ids,
-                                          past_key_value=past_key_value,
-                                          output_attentions=output_attentions,
-                                          use_cache=use_cache,
-                                          cache_position=cache_position,
-                                          position_embeddings=position_embeddings)
+    def forward(self, x: Tensor, attention_mask:Tensor=None, position_ids:Tensor=None, past_key_value=None, output_attentions=None, use_cache=None, cache_position=None, position_embeddings=None):
+        if self.initial_layer is not None:
+            out_original = self.initial_layer(x, 
+                                              attention_mask=attention_mask, 
+                                              position_ids=position_ids,
+                                              past_key_value=past_key_value,
+                                              output_attentions=output_attentions,
+                                              use_cache=use_cache,
+                                              cache_position=cache_position,
+                                              position_embeddings=position_embeddings)
+        else:
+            out_original = [x, False]
         out_original_tns = out_original[0]
+        if self.composition_type == 'stack':
+            x = out_original_tns
         if len(out_original) == 2:
             out_original_cache = out_original[1]
         else:
             out_original_cache = None
         del out_original
         if self.transformer_float_mode == 32:
+            out_original_tns =  out_original_tns.to(torch.float32).detach()
+            #разрыв градиента. Но пофигу, мы не хотим, чтобы он проходил в предыдущие слои
             x = x.to(torch.float32)
-            out_original_tns =  out_original_tns.to(torch.float32)
         for i in range(self.t_layers_count):
             corrector_block = self.corrector_stack[i]
-            x = corrector_block[0](x) + x
-            x = corrector_block[1](x) + x
-        x = out_original_tns + x * self.conservativity
+            x = x + corrector_block[0](x)
+            x = x + corrector_block[1](x)
+        x = x + out_original_tns
         if self.lmhead_float_mode == 16:
             x = x.to(torch.float16)
         else:
-            x = x.to(torch.float32)
+            if x.dtype != torch.float32:
+                #разрыв градиента. Но если у нас x.dtype != torch.float32, то нас это уже не волнует, трансформер работает чисто на инференс
+                x = x.to(torch.float32)
         return (x, out_original_cache)
