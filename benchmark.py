@@ -3,6 +3,9 @@
 from rouge import Rouge
 from nltk.translate.bleu_score import sentence_bleu
 import re
+import numpy as np
+import warnings
+warnings.filterwarnings("ignore")
 
 def evaluate_translation(predicted, reference):
     # Нормализация
@@ -73,15 +76,27 @@ class LLMBenchmark:
             },
             {
                 "type": "fact",
-                "prompt": "Перечисли всех неулучшенных существ из замка Stronghold через запятую на английском. Поставь | в конце. Ответ:",
+                "prompt": "Перечисли всех неулучшенных существ из замка Stronghold в Heroes 3 через запятую на английском. Поставь | в конце. Ответ:",
                 "reference": ["goblin", "wolf rider", "orc", "ogre", "roc", "cyclops", "behemoth"],
                 "format": "list"
+            },
+            {
+                "type": "fact",
+                "prompt": "Как называется фракция (замок, город), из которой происходит Warlock в Героях меча и магии 3? Ответь на английском, одним словом. Поставь | в конце. Ответ:",
+                "reference": "dungeon",
+                "format": "single"
+            },
+            {
+                "type": "fact",
+                "prompt": "Какой из этих юнитов относится к фракции Dungeon в Героях-3? Варианты: Скелет, Орк, Гарпия, Циклоп. Выбери вариант из списка. Поставь | в конце. Ответ:",
+                "reference": "гарпия",
+                "format": "single"
             },
             {
                 "type": "fact", 
                 "prompt": "Какой юнит имеет самую высокую скорость в замке Tower? Выбери из: Arch Mage, Giant, Stone Gargoyle, Master Genie. Ответь одним названием на английском, в конце поставь |. Ответ:",
                 "reference": "master genie",
-                "format": "multiple_choice"
+                "format": "single"
             },
             {
                 "type": "fact",
@@ -105,7 +120,13 @@ class LLMBenchmark:
                 "type": "fact",
                 "prompt": "Какой юнит из Doom применяет автоматическую пушку? Выбери из: Манкубус, Какодемон, Имп, Арахнотрон, Арч-Вайл. Ответь одним названием на русском, в конце поставь |. Ответ:",
                 "reference": "арахнотрон",
-                "format": "multiple_choice"
+                "format": "single"
+            },
+            {
+                "type": "fact",
+                "prompt": "Какой монстр из Doom сражается только в ближнем бою? Выбери из: Манкубус, Какодемон, Пинки, Имп, Арахнотрон, Арч-Вайл. Ответь одним названием на русском, в конце поставь |. Ответ:",
+                "reference": "пинки",
+                "format": "single"
             },
             {
                 "type": "fact",
@@ -123,7 +144,7 @@ class LLMBenchmark:
                 "type": "fact", 
                 "prompt": "Какой юнит из Serious Sam First Encounter применяет ракеты? Выбери из: Красный Биомеханоид, Жёлтый Арахнид, Скелет Клира, Гарпия. Ответь одним названием на русском, в конце поставь |. Ответ:",
                 "reference": "красный биомеханоид",
-                "format": "multiple_choice"
+                "format": "single"
             },
             {
                 "type": "fact",
@@ -159,66 +180,72 @@ class LLMBenchmark:
             ]]
         ]
         
-    def run(self, model, tokenizer, device):
+    def run(self, model, tokenizer, device, trial_count=2):
         log_file = 'bench_log.txt'
         with open(log_file, 'w', encoding="utf-8") as f:
             s = ''
             f.write(s)
-            
-        results = []
-        for test in self.tests:
-            #try:
-            # Генерация ответа
-            inputs = tokenizer(test["prompt"], return_tensors="pt").to(device)
-            repetition_penalty = 1.2
-            generate_ids = model.generate(
-                inputs.input_ids.to(device),
-                stop_strings=["|"],
-                max_new_tokens=100,
-                temperature=0.01,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                bos_token_id=tokenizer.bos_token_id,
-                repetition_penalty=repetition_penalty,
-                early_stopping=True,
-                use_cache=True,
-                num_beams=1,
-                tokenizer=tokenizer
-            )
-            generate_ids = generate_ids[:, inputs.input_ids.shape[1]:]
-            response = tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0].split("|")[0].strip()
-            log_file = 'bench_log.txt'
-            with open(log_file, 'a', encoding="utf-8") as f:
-                s = f'{test} \nANSW: {response}\n'
-                f.write(s)
-            
-            # Валидация
-            if test["type"] == "fact":
-                if test["format"] == "single":
-                    score = int(normalize_answer(response) == normalize_answer(test["reference"]))
-                elif test["format"] == "list":
-                    pred_items = [x.strip() for x in normalize_answer(response).split(",")]
-                    ref_items = [normalize_answer(x) for x in test["reference"]]
-                    correct = len(set(pred_items) & set(ref_items))
+
+        for trial in range(trial_count):
+            results = []
+            for test in self.tests:
+                #try:
+                # Генерация ответа
+                if tokenizer is not None:
+                    inputs = tokenizer(test["prompt"], return_tensors="pt").to(device)
+                    repetition_penalty = 1.2
+                    generate_ids = model.generate(
+                        inputs.input_ids.to(device),
+                        stop_strings=["|"],
+                        max_new_tokens=100,
+                        temperature=0.01,
+                        pad_token_id=tokenizer.pad_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                        bos_token_id=tokenizer.bos_token_id,
+                        repetition_penalty=repetition_penalty,
+                        early_stopping=True,
+                        use_cache=True,
+                        num_beams=1,
+                        tokenizer=tokenizer
+                    )
+                    generate_ids = generate_ids[:, inputs.input_ids.shape[1]:]
+                    response = tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0].split("|")[0].strip().replace(".", "")
+                else:
+                    response = model.generate(test["prompt"], None, None).split("|")[0].strip().replace(".", "")
+    
+                with open(log_file, 'a', encoding="utf-8") as f:
+                    s = f'{test} \nANSW: {response}\n'
+                    f.write(s)
+                
+                # Валидация
+                if test["type"] == "fact":
+                    if test["format"] == "single":
+                        score = int(normalize_answer(response) == normalize_answer(test["reference"]))
+                    elif test["format"] == "list":
+                        pred_items = [x.strip() for x in normalize_answer(response).split(",")]
+                        ref_items = [normalize_answer(x) for x in test["reference"]]
+                        correct = len(set(pred_items) & set(ref_items))
+                        score = {
+                            "precision": correct / len(pred_items) if pred_items else 0,
+                            "recall": correct / len(ref_items)
+                        }
+                    elif test["format"] == "multiple_choice":
+                        options = [normalize_answer(opt) for opt in test.get("options", [])]
+                        score = int(normalize_answer(response) in options)
+                elif test["type"] == "translation":
+                    rouge = Rouge()
+                    if len(response ) < 10:
+                        response = "Empty answer"
+                    scores = rouge.get_scores(normalize_answer(response), normalize_answer(test["reference"]))[0]
+                    bleu = sentence_bleu([test["reference"].split()], response.split())
                     score = {
-                        "precision": correct / len(pred_items) if pred_items else 0,
-                        "recall": correct / len(ref_items)
+                        "rouge_l": scores["rouge-l"]["f"],
+                        "bleu": bleu
                     }
-                elif test["format"] == "multiple_choice":
-                    options = [normalize_answer(opt) for opt in test.get("options", [])]
-                    score = int(normalize_answer(response) in options)
-            elif test["type"] == "translation":
-                rouge = Rouge()
-                if len(response ) < 10:
-                    response = "Empty answer"
-                scores = rouge.get_scores(normalize_answer(response), normalize_answer(test["reference"]))[0]
-                bleu = sentence_bleu([test["reference"].split()], response.split())
-                score = {
-                    "rouge_l": scores["rouge-l"]["f"],
-                    "bleu": bleu
-                }
-            
-            results.append((test["type"], score))
+                with open(log_file, 'a', encoding="utf-8") as f:
+                    s = f'{score} \n'
+                    f.write(s)
+                results.append((test["type"], score))
                 
             # except Exception as e:
             #     print(f"Error in test: {test['prompt']}\n{str(e)}")
@@ -245,9 +272,9 @@ class LLMBenchmark:
                 aggregated["translation"]["count"] += 1
                 
         return {
-            "fact_score": aggregated["fact"]["total"] / aggregated["fact"]["count"] if aggregated["fact"]["count"] else 0,
-            "translation_rouge": aggregated["translation"]["rouge_l"] / aggregated["translation"]["count"] if aggregated["translation"]["count"] else 0,
-            "translation_bleu": aggregated["translation"]["bleu"] / aggregated["translation"]["count"] if aggregated["translation"]["count"] else 0,
+            "fact_score": float(np.round(aggregated["fact"]["total"] / aggregated["fact"]["count"] if aggregated["fact"]["count"] else 0, 3)),
+            "translation_rouge": float(np.round(aggregated["translation"]["rouge_l"] / aggregated["translation"]["count"] if aggregated["translation"]["count"] else 0, 5)),
+            #"translation_bleu": aggregated["translation"]["bleu"] / aggregated["translation"]["count"] if aggregated["translation"]["count"] else 0,
         }
 
 class DummyModel:
@@ -255,9 +282,11 @@ class DummyModel:
         # Заглушка для тестирования
         answers = {
             "К какому городу относится юнит Angel?": "castle |",
-            "Перечисли всех существ 7 уровня из замка Necropolis": "dread knight, ghost dragon |",
+            "Перечисли всех существ 7 уровня из замка Necropolis": "bone dragon, ghost dragon |",
+            "Какой монстр в Doom 2 имеет стреляет самонаводящимися боеприпасами": "Ревенант",
+            "Какой юнит из Doom применяет автоматическую пушку?": "Арахнотрон",
             "Какой юнит имеет самую высокую скорость в замке Tower?": "Master Genie |",
-            "Какая основная способность класса героя Knight?": "Логистика |",
+            "Какая основная способность класса героя Knight?": "Лидерство |",
             "Переведите на английский: Сегодня солнечный день": "Today is a sunny day."
         }
         for key in list(answers.keys()):
@@ -266,6 +295,6 @@ class DummyModel:
         return "This is empty answer"
         
 
-#benchmark = LLMBenchmark()
-#results = benchmark.run(DummyModel())
+#benchmark_cur = LLMBenchmark()
+#results = benchmark_cur.run(DummyModel())
 #print(results)
