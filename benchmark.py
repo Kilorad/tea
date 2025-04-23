@@ -134,7 +134,7 @@ class LLMBenchmark:
             {
                 "type": "fact",
                 "prompt": "Какое оружие есть в Serious Sam the Second Encounter и нет в Serious Sam the First Encounter? Ответь через запятую на английском, в конце поставь '|'. Ответ:",
-                "reference": ["serious bomb", "sniper rifle", "firethrower"],
+                "reference": ["serious bomb", "sniper rifle", "firethrower", "chainsaw"],
                 "format": "list"
             },
             
