@@ -48,7 +48,6 @@ class MemLayer(nn.Module):
         output_values = self.out_linear(output_values)
         
         return output_values + x
-        
 
 class ResNet(nn.Module):
     def __init__(self, input_size, out_size, dropout_rate, layer_configs=None, use_sigmoid_end=True, use_bathcnorm=True, use_activation=True, activation=nn.ReLU()):
@@ -230,7 +229,7 @@ class EResNetPro(nn.Module):
     1) резнеты разные (их гиперы выбираются из распределения, где большие слои идут с меньшей вероятностью)
     2) иная форма дропаута. Выбрасываются некоторые из резнетов целиком
     '''
-    def __init__(self, input_size, out_size, net_dropout_rate, individ_dropout_rate, layer_configs=None, use_sigmoid_end=True, use_batchnorm=True, use_activation=True, activation=nn.ReLU(), sample_features=0.9, composition_size=200, feature_name: str = "features_vec", lin_bottleneck_size=None, lin_model_add=None, use_memnets=False, memnet_params={}, max_batch_size=1024 * 10, aggregation_by_mean=True):
+    def __init__(self, input_size, out_size, net_dropout_rate, individ_dropout_rate, layer_configs=None, use_sigmoid_end=True, use_batchnorm=True, use_activation=True, activation=nn.ReLU(), sample_features=0.9, composition_size=200, feature_name: str = "features_vec", lin_bottleneck_size=None, lin_model_add=None, use_memnets=False, memnet_params={}, max_batch_size=1024 * 10, aggregation_by_mean=True, exponential_layer_size=True):
         '''теперь мы задаём матожидание размера слоя, а не его фактический размер
         memnet_params={'num_heads', 'query_size', 'num_key_values', 'value_size'}'''
         super().__init__()
@@ -258,7 +257,10 @@ class EResNetPro(nn.Module):
         for i in range(composition_size):
             layer_configs_current = []
             for l in layer_configs:
-                value = int(np.random.exponential(scale=l))
+                if exponential_layer_size:
+                    value = int(np.random.exponential(scale=l))
+                else:
+                    value = l
                 if value < 3:
                     value = 3
                 layer_configs_current.append(value)
@@ -301,18 +303,18 @@ class EResNetPro(nn.Module):
         if self.training:
             if self.net_dropout <=0:
                 idx_drop = torch.zeros(self.composition_size, device=X.device)
-            while 1:
-                idx_drop = torch.rand(self.composition_size, device=X.device) < self.net_dropout
+            for trial in range(25):
+                idx_drop = torch.rand(self.composition_size, device=X.device)
                 if torch.all(idx_drop):
                     idx_drop[:] = 0
                 idx_drop = idx_drop.to(torch.uint8)
-                composition_size_effective = torch.sum( 1 - idx_drop)
                 #мы хотим, чтобы при дропауте была гарантия, что выкинется не менее self.net_dropout субмоделей
-                if (composition_size_effective <= self.composition_size * (1 - self.net_dropout)) or (self.net_dropout<=0):
+                if (composition_size_effective <= self.composition_size * (1 - self.net_dropout) + 0.2) or (self.net_dropout<=0):
                     break
             
             if not (self.lin_bottleneck_size is None):
                 idx_drop[-1] = 0 #линейная субмодель жива всегда
+            composition_size_effective = torch.sum( 1 - idx_drop)#то есть делим потом на число актуальных, а не всех, субмоделей
         #X = X.to(torch.float32)
         Y = None
 
