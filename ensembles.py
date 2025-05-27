@@ -222,7 +222,46 @@ class ResMemNet(nn.Module):
             i += 1
         return X
 
-
+def tuple_vstack(Y):
+    """
+    Аналог torch.vstack для списка тензоров или списка кортежей вида (tensor, [tensor, tensor, ...]).
+    
+    Args:
+        Y: list тензоров или list кортежей вида (tensor, [tensor, tensor, ...])
+    
+    Returns:
+        Если на входе list тензоров - возвращает torch.vstack(Y)
+        Если на входе list кортежей - возвращает кортеж (vstacked_main, [vstacked_1, vstacked_2, ...])
+    """
+    if not Y:
+        return Y
+    
+    # Проверяем первый элемент, чтобы определить формат данных
+    first_element = Y[0]
+    
+    if isinstance(first_element, tuple):
+        # Случай кортежей: (tensor, [tensor, tensor, ...])
+        main_tensors = []
+        list_of_lists = []
+        
+        # Инициализируем list_of_lists в зависимости от количества тензоров во втором элементе кортежа
+        if len(first_element[1]) > 0:
+            list_of_lists = [[] for _ in range(len(first_element[1]))]
+        
+        for item in Y:
+            main_tensors.append(item[0])
+            for i, sub_tensor in enumerate(item[1]):
+                list_of_lists[i].append(sub_tensor)
+        
+        # Собираем результаты
+        stacked_main = torch.vstack(main_tensors)
+        stacked_sublist = [torch.vstack(lst) for lst in list_of_lists]
+        
+        return (stacked_main, stacked_sublist)
+    else:
+        # Простой случай: list тензоров
+        return torch.vstack(Y)
+    
 class EResNetPro(nn.Module):
     '''
     Вероятностная композиция резнетов. Примечательна тем, что
@@ -296,7 +335,8 @@ class EResNetPro(nn.Module):
         Y = []
         for batch_start in range(0, X.shape[0], self.max_batch_size):
             Y += [self.forward_batch(X[batch_start : batch_start + self.max_batch_size])]
-        Y = torch.vstack(Y)
+        
+        Y = tuple_vstack(Y)
         return Y
     def forward_batch(self, X):
         composition_size_effective = self.composition_size

@@ -141,7 +141,6 @@ class GPTLayer(nn.Module):
         
 # Тестирование слоя
 def test_layer():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     layer = GPTLayer(
         dim=512,
@@ -335,6 +334,19 @@ def count_trainable_parameters(model: nn.Module) -> tuple[int, int]:
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
     return trainable, frozen
+
+def move_to_device(model, device):
+    model.to(device)  # Основной перенос
+    # Рекурсивно проверяем все подмодули и тензоры
+    for name, child in model.named_children():
+        move_to_device(child, device)
+    for name, param in model.named_parameters():
+        param.data = param.data.to(device)
+        if param.grad is not None:
+            param.grad.data = param.grad.data.to(device)
+    for name, buf in model.named_buffers():
+        buf.data = buf.data.to(device)
+        
 #теперь сборка модели с адаптерами
 def assemble_model(model, 
                    path2lmhead, 
@@ -343,7 +355,8 @@ def assemble_model(model,
                    to_generate,
                    lm_head_adapter_params,
                    transformer_adapter_params,
-                   optimizer_params
+                   optimizer_params,
+                   cur_device=device
                   ):
     if start_train:
         print('creating tadapter')
@@ -362,7 +375,7 @@ def assemble_model(model,
                                      dropout=transformer_adapter_params['dropout'],
                                      composition_type='stack',
                                      concat=transformer_adapter_params['concat'],
-                                     in_adapter_sz=transformer_adapter_params['original_transformer_size']).to(device)
+                                     in_adapter_sz=transformer_adapter_params['original_transformer_size']).to(cur_device)
         else:
             tadapter = GPTAdapterLayer(initial_layer=None, 
                                      dim=transformer_adapter_params['embed_dim'], 
@@ -373,7 +386,7 @@ def assemble_model(model,
                                      conservativity=transformer_adapter_params['transformer_adapter_weight'],
                                      dropout=transformer_adapter_params['dropout'],
                                      composition_type='stack',
-                                     concat=transformer_adapter_params['concat']).to(device)
+                                     concat=transformer_adapter_params['concat']).to(cur_device)
     else:
         print('loading tadapter')
         tadapter = torch.load(path2tadapter, weights_only=False)
@@ -406,13 +419,13 @@ def assemble_model(model,
                    sample_features=lm_head_adapter_params['sample_features'], 
                    composition_size=lm_head_adapter_params['composition_size'], 
                    lin_bottleneck_size=None,
-                   lin_model_add=nn.Linear(lin_model_size, lm_head_adapter_params['cardinality']).to(device),
+                   lin_model_add=nn.Linear(lin_model_size, lm_head_adapter_params['cardinality']).to(cur_device),
                    memnet_params=lm_head_adapter_params['memnet_params'],
                    use_memnets=lm_head_adapter_params['use_memnets'],
                    max_batch_size=lm_head_adapter_params['head_max_batch_size'],
                    aggregation_by_mean=False,
-                   exponential_layer_size=False).to(device)
-        head.submodels[-1].weight = torch.nn.Parameter(torch.load("lin_model.pth").to(device).to(torch.float32))
+                   exponential_layer_size=False).to(cur_device)
+        head.submodels[-1].weight = torch.nn.Parameter(torch.load("lin_model.pth").to(cur_device).to(torch.float32))
         head.submodels[-1].weight.requires_grad = lm_head_adapter_params['learnable_linear_model']
     else:
         print('loading heavy LM head')
@@ -427,15 +440,18 @@ def assemble_model(model,
     
     #собрать
     model.eval()
-
-    head.to(device)
+    move_to_device(head, cur_device)
+    move_to_device(tadapter, cur_device)
+    
     head.by_submodels = False
 
     optimizer = None
     if to_generate:
         #ща сошьём
         head.half()
+        head.eval()
         tadapter.half()
+        tadapter.eval()
         head.training = False
         model.lm_head = head
         initial_layer = model.model.layers[-1]
@@ -452,11 +468,11 @@ def assemble_model(model,
             optimizer = torch.optim.Adam([
                 {'params': head.parameters(), 'lr': optimizer_params['lr']},
                 {'params': tadapter.parameters(), 'lr': optimizer_params['lr_transformer']}
-            ], lr=optimizer_params['lr'])
+            ], lr=optimizer_params['lr']/optimizer_params['accum_batch'])
         else:
             momentum = 0.9
             lr = optimizer_params['lr'] * 0.08
-            lr_transformer = optimizer_params['lr_transformer'] * 0.08
+            lr_transformer = (optimizer_params['lr_transformer']/optimizer_params['accum_batch']) * 0.08
             optimizer = torch.optim.SGD([
                 {'params': head.parameters(), 'lr': lr},
                 {'params': tadapter.parameters(), 'lr': lr_transformer}
