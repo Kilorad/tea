@@ -415,7 +415,7 @@ def assemble_model(model,
                    use_sigmoid_end=False, 
                    use_batchnorm=True, 
                    use_activation=True, 
-                   activation=nn.LeakyReLU(), 
+                   activation=nn.Sigmoid(),#nn.LeakyReLU(), 
                    sample_features=lm_head_adapter_params['sample_features'], 
                    composition_size=lm_head_adapter_params['composition_size'], 
                    lin_bottleneck_size=None,
@@ -486,3 +486,42 @@ def disassemble_model(model):
     #удалить из модели адаптеры
     model.model.layers[-1] = model.model.layers[-1].initial_layer
     model.lm_head = model.lm_head.submodels[-1]
+
+
+def extend_head(head_old, lm_head_adapter_params, transformer_adapter_params, cur_device):
+    '''Нужно, чтобы расширить выходную голову - всобачить в её начало нужное число субмоделей заданной архитектуры
+    '''
+    if ('wide' in transformer_adapter_params) and (transformer_adapter_params['wide']):
+        #в этом случае 'embedding_size' уже тупо посчитан снаружи. Формула:
+        #transformer_adapter_params['embed_dim'] * transformer_adapter_params['t_layers_count'] + transformer_adapter_params['original_transformer_size']
+        #Ну типа исходный трансформер + все слои адаптера через конкат
+        input_size = lm_head_adapter_params['embedding_size']
+        lin_model_size = transformer_adapter_params['original_transformer_size']
+    else:
+        #размер эмбеддинга lm-head получется равен или размеру эмбеддинга исходного трансформера, или удвоенному, 
+        #есkи исходный конкатенируется с адаптерным
+        input_size = lm_head_adapter_params['embedding_size'] * (1 + transformer_adapter_params['concat'])
+        lin_model_size = lm_head_adapter_params['embedding_size']
+        
+
+    head_new = ensembles.EResNetPro(input_size=input_size, 
+               out_size=lm_head_adapter_params['cardinality'], 
+               net_dropout_rate=lm_head_adapter_params['net_dropout_rate'], 
+               individ_dropout_rate=lm_head_adapter_params['individ_dropout_rate'],
+               layer_configs=lm_head_adapter_params['layer_configs_head'], 
+               use_sigmoid_end=False, 
+               use_batchnorm=True, 
+               use_activation=True, 
+               activation=nn.LeakyReLU(), 
+               sample_features=lm_head_adapter_params['sample_features'], 
+               composition_size=lm_head_adapter_params['composition_size'], 
+               lin_bottleneck_size=None,
+               lin_model_add=nn.Linear(lin_model_size, lm_head_adapter_params['cardinality']).to(cur_device),
+               memnet_params=lm_head_adapter_params['memnet_params'],
+               use_memnets=lm_head_adapter_params['use_memnets'],
+               max_batch_size=lm_head_adapter_params['head_max_batch_size'],
+               aggregation_by_mean=False,
+               exponential_layer_size=False).to(cur_device)
+    head_old.submodels = head_new.submodels[:lm_head_adapter_params['composition_size']] + head_old.submodels
+    head_old.composition_size += lm_head_adapter_params['composition_size']
+    return head_old

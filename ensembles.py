@@ -344,17 +344,18 @@ class EResNetPro(nn.Module):
             if self.net_dropout <=0:
                 idx_drop = torch.zeros(self.composition_size, device=X.device)
             for trial in range(25):
-                idx_drop = torch.rand(self.composition_size, device=X.device)
+                idx_drop = torch.rand(self.composition_size, device=X.device) < self.net_dropout
                 if torch.all(idx_drop):
                     idx_drop[:] = 0
                 idx_drop = idx_drop.to(torch.uint8)
+                
+                composition_size_effective = torch.sum( 1 - idx_drop)#то есть делим потом на число актуальных, а не всех, субмоделей
                 #мы хотим, чтобы при дропауте была гарантия, что выкинется не менее self.net_dropout субмоделей
                 if (composition_size_effective <= self.composition_size * (1 - self.net_dropout) + 0.2) or (self.net_dropout<=0):
                     break
-            
+            #print(idx_drop)
             if not (self.lin_bottleneck_size is None):
                 idx_drop[-1] = 0 #линейная субмодель жива всегда
-            composition_size_effective = torch.sum( 1 - idx_drop)#то есть делим потом на число актуальных, а не всех, субмоделей
         #X = X.to(torch.float32)
         Y = None
 
@@ -372,12 +373,12 @@ class EResNetPro(nn.Module):
             if len(X_shape) == 3:
                 X = X.view(X_shape[0] * X_shape[1], X_shape[2])
             if Y is None:
-                Y = self.submodels[i](X[:, features_set]) / self.composition_size
+                Y = self.submodels[i](X[:, features_set]) / composition_size_effective
                 if self.by_submodels:
                     Y_lst += [Y.clone()]
             else:
                 if self.aggregation_by_mean:
-                    Y_add = self.submodels[i](X[:, features_set]) / self.composition_size
+                    Y_add = self.submodels[i](X[:, features_set]) / composition_size_effective
                 else:
                     Y_add = self.submodels[i](X[:, features_set])
                 Y += Y_add
