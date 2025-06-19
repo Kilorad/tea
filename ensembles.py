@@ -7,6 +7,7 @@ import torch
 import random
 
 class MemLayer(nn.Module):
+    #Слой-база данных
     def __init__(self, input_size, output_size, num_heads, query_size, num_key_values, value_size):
         super(MemLayer, self).__init__()
         
@@ -60,8 +61,8 @@ class ResNet(nn.Module):
             out_sz = hidden_sz
             self.layers.append(nn.Linear(in_sz, out_sz))
             with torch.no_grad():
-                self.layers[-1].weight *= 0.00001
-                self.layers[-1].bias *= 0.00001
+                self.layers[-1].weight *= 0.01
+                self.layers[-1].bias *= 0.01
             self.layers.append(activation)
             self.layers.append(nn.Dropout(p=self.dropout_rate))
             self.layers.append(nn.LayerNorm(out_sz))
@@ -73,8 +74,8 @@ class ResNet(nn.Module):
         out_sz = out_size
         self.layers.append(nn.Linear(in_sz, out_sz))
         with torch.no_grad():
-            self.layers[-1].weight *= 0.00001
-            self.layers[-1].bias *= 0.00001
+            self.layers[-1].weight *= 0.01
+            self.layers[-1].bias *= 0.01
         self.layers.append(nn.Dropout(p=self.dropout_rate))
         self.layers.append(nn.LayerNorm(out_sz))
         self.layers.append(nn.Sigmoid())
@@ -210,13 +211,15 @@ class ResMemNet(nn.Module):
             if ('Sigmoid' in str(l)) and (not self.use_sigmoid_end):
                 break
             if ('LayerNorm' in str(l)) and (len(X.shape) == 3):
-                shp = X.shape
-                X = X.view([shp[0], shp[1] * shp[2]])
-                if l._parameters['weight'].shape[0] != X.shape[-1]:
-                    self.layers[i] = nn.LayerNorm(X.shape[-1], device=X.device)
-                    l = self.layers[i]
-                X = l(X)
-                X = X.view([shp[0], shp[1], shp[2]])
+                continue
+                #не нужна
+                # shp = X.shape
+                # X = X.view([shp[0], shp[1] * shp[2]])
+                # if l._parameters['weight'].shape[0] != X.shape[-1]:
+                #     self.layers[i] = nn.LayerNorm(X.shape[-1], device=X.device)
+                #     l = self.layers[i]
+                # X = l(X)
+                # X = X.view([shp[0], shp[1], shp[2]])
             else:
                 X = l(X)
             i += 1
@@ -344,18 +347,18 @@ class EResNetPro(nn.Module):
             if self.net_dropout <=0:
                 idx_drop = torch.zeros(self.composition_size, device=X.device)
             for trial in range(25):
-                idx_drop = torch.rand(self.composition_size, device=X.device) < self.net_dropout
+                idx_drop = torch.rand(self.composition_size, device=X.device) #< self.net_dropout
                 if torch.all(idx_drop):
                     idx_drop[:] = 0
                 idx_drop = idx_drop.to(torch.uint8)
-                
                 composition_size_effective = torch.sum( 1 - idx_drop)#то есть делим потом на число актуальных, а не всех, субмоделей
                 #мы хотим, чтобы при дропауте была гарантия, что выкинется не менее self.net_dropout субмоделей
                 if (composition_size_effective <= self.composition_size * (1 - self.net_dropout) + 0.2) or (self.net_dropout<=0):
                     break
-            #print(idx_drop)
+            
             if not (self.lin_bottleneck_size is None):
                 idx_drop[-1] = 0 #линейная субмодель жива всегда
+            
         #X = X.to(torch.float32)
         Y = None
 
