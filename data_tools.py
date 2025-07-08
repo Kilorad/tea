@@ -39,46 +39,50 @@ class InstructDatasetR(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        self.log_samples.append(self.data[idx])
-        parts = self.data[idx]
-        text = parts[0]
-        label = parts[1]
-        parts = [parts[0], parts[1], 1]
-        for r_variant in [-2,-1,-0.5,0.5,1,2]:
-            s = f"<r{r_variant}>"
-            if s in label:
-                parts[-1] = r_variant
-                label = label.replace(s, '')
-                break
-            s = f"<{r_variant}>"
-            if s in label:
-                parts[-1] = r_variant
-                label = label.replace(s, '')
-                break
-        r = parts[-1]
-        if text is None:
-            text = label
-        
-        # Кодируем текст и метку с помощью tokenizer
-        encoding = self.tokenizer.encode_plus(
-            text,
-            max_length=self.max_seq_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
-        input_ids = encoding['input_ids']
-        attention_mask = encoding['attention_mask']
-        
-        # Кодируем метку
-        label_encoding = self.tokenizer.encode_plus(
-            label,
-            max_length=self.max_seq_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
-        label_ids = label_encoding['input_ids']
+        while 1:
+            self.log_samples.append(self.data[idx])
+            parts = self.data[idx]
+            text = parts[0]
+            label = parts[1]
+            parts = [parts[0], parts[1], 1]
+            for r_variant in [-2,-1,-0.5,0.5,1,2]:
+                s = f"<r{r_variant}>"
+                if s in label:
+                    parts[-1] = r_variant
+                    label = label.replace(s, '')
+                    break
+                s = f"<{r_variant}>"
+                if s in label:
+                    parts[-1] = r_variant
+                    label = label.replace(s, '')
+                    break
+            r = parts[-1]
+            if r == 0:
+                continue
+            if text is None:
+                text = label
+            
+            # Кодируем текст и метку с помощью tokenizer
+            encoding = self.tokenizer.encode_plus(
+                text,
+                max_length=self.max_seq_length,
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt'
+            )
+            input_ids = encoding['input_ids']
+            attention_mask = encoding['attention_mask']
+            
+            # Кодируем метку
+            label_encoding = self.tokenizer.encode_plus(
+                label,
+                max_length=self.max_seq_length,
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt'
+            )
+            label_ids = label_encoding['input_ids']
+            break
         return {
             'input_ids': input_ids[0],
             'attention_mask': attention_mask,
