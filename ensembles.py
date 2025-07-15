@@ -303,8 +303,8 @@ class EResNetPro(nn.Module):
                     value = int(np.random.exponential(scale=l))
                 else:
                     value = l
-                if value < 3:
-                    value = 3
+                if value < l/6.:
+                    value = int(l/6.)
                 layer_configs_current.append(value)
             print('use_memnets', self.use_memnets)
             if self.use_memnets:
