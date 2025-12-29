@@ -1,57 +1,53 @@
 TEA - Tail Embedding Adapter
 
-ЧТО ТУТ ВООБЩЕ ПРОИСХОДИТ?
+WHAT'S EVEN GOING ON HERE?
 
-Очень простая идея, основанная на двух предпосылках:
-1) LLM состоят в основном из sequential слоёв, а LM head у них легковесная
-2) Мы умеем создавать табличные модели, которые сходятся намного лучше, быстрее и надёжнее, чем трансформеры. Обычно такой табличной моделью является catboost, но у нас будет EResNetProb - это некий аналог бустинга и random forest, но обучаемый через backpropagation, и имеющий похожие плюсы и минусы.
+A very simple idea based on two premises:
+1) LLMs mainly consist of sequential layers, and their LM head is lightweight.
+2) We know how to create tabular models that converge much better, faster, and more reliably than transformers. Usually, such a tabular model is CatBoost, but we will use EResNetProb - this is a kind of analogue of boosting and random forest, but trainable via backpropagation, with similar pros and cons.
 
-Итого, наш пайплайн:
-1) Взять LLM
-2) Взять датасет
-3) Проинференсить LLM на батче датасета, причём из LLM брать не токены на выходе, и даже не логиты, а эмбеддинги выходного слоя.
-4) Сделать таблицу "эмбеддинг - правильный токен"
-5) Сделать шаг обучения табличной модели на этой таблице (можно было бы и бустинг, но он плохо работает, если большое множество классов на выходе)
-6) Воткнуть эту модель вместо LM-head в LLM
+So, our pipeline:
+1) Take an LLM.
+2) Take a dataset.
+3) Run inference on the LLM for a dataset batch, taking not the output tokens or even logits from the LLM, but the embeddings from the output layer.
+4) Create an "embedding - correct token" table.
+5) Take a training step for the tabular model on this table (boosting could be used, but it works poorly if there is a large set of output classes).
+6) Insert this model instead of the LM-head in the LLM.
 
+Analogue, advantages, and disadvantages.
+This approach "competes" with LoRA.
+TEA Pros:
+- Much faster if you have a large dataset.
+- Increases the size of the neural network, meaning it can make a less capable model more capable.
+- If TEA has few submodels, it's quite fast at inference. If there are many, it's quite resistant to overfitting. So, to reiterate, adding 1 billion parameters to a model via transformer layers will take longer to execute than adding the same billion parameters via TEA's linear layers.
+- Relatively easily adds new "knowledge" to the neural network - easier than LoRA. Meaning, in fewer hours.
+TEA Cons:
+- If the original model couldn't do something, a very large adapter will be needed to teach it that.
+- During training, initially the generation quality will be like that of the original model, then it will drop, then it will rise higher. LoRA doesn't have this dip.
+- A model with TEA runs slower than a model with LoRA (because there are more layers).
 
-Аналог, преимущества и недостатки.
-Данный подход "конкурирует" с LoRA.
-Плюсы TEA:
-- намного быстрее, если у вас большой датасет
-- увеличивает размер нейронки, то есть позволяет сделать из менее ёмкой более ёмкую
-- если в TEA мало субмоделей, то он довольно быстрый на инференсе. Если много, то довольно устойчивый к переобучению. То есть, ещё раз, если к модели добавить 1 миллиард параметров через трансформерные слои, то это будет исполняться дольше, чем если те же миллиард параметров добавить через линейные слои TEA.
-- Относительно легко добавляет в нейронку новые "знания" - легче, чем LoRA. В смысле, за меньшее число часов
-Минусы TEA:
-- Если исходная модель чего-то не умела, то понадобится очень большой адаптер, чтобы научить её этому.
-- По ходу обучения вначале у вас будет качество генерации, как у исходной модели, затем просядет, затем поднимется выше. У LoRA нет этой просадки.
-- Модель с TEA исполняется дольше, чем модель с LoRA (потому что слоёв больше)
+The main training script is `make_model_composed`. Composed - because previously I collected embedding-token pairs in a file and trained on them separately, and that was not composed.
 
+Key hyperparameters and flags:
+`start_train` - set to `True` if you're just starting to train the model, and `False` if a tail adapter checkpoint is already in the folder.
 
+`learnable_linear_model` - alongside the resnets, you will also have the original lm_head. This can also be trained via this hyperparameter. If trained, the training process is generally much faster, but generation quality is less stable. Furthermore, if this is `True`, you cannot use conservativity (it will have to be zeroed).
+`conservativity` - the higher it is, the more we are tied to how the original, base model would generate. This is a number from 0 to infinity, but in practice, setting it above 2 seems pointless. The higher the conservativity, the less chance of getting an unstable model. The lower the conservativity - the more "original" the model.
+`composition_size` - the number of submodels. If 1, then we have one resnet; if many, then we have a whole random forest or boosting ensemble of them. The higher the `net_dropout_rate`, the more the structure resembles a random forest, i.e., less overfitting; the lower the `net_dropout_rate`, the more it resembles boosting, i.e., better accuracy.
 
-Основной скрипт обучения - make_model_composed. Composed - потому что раньше я собирал пары эмбеддинг-токен в файл, и обучал на них раздельно, и там было не composed.
-
-Ключевые гиперпараметры и флаги:
-start_train - проставьте в True, если только начинаете учить модель, и False, если в папке уже лежит чекпоинт tail adapter-а
-
-learnable_linear_model - у вас в параллель с резнетами будет ещё и исходная lm_head. Так вот, её можно тоже обучать через этот гиперпараметр. Если обучаете, то процесс обучения идёт в целом намного быстрее, но качество генерации менее стабильно. Кроме того, если здесь True, то не получится использовать conservativity (его придётся занулить)
-conservativity - чем больше, тем сильнее мы привязаны к тому, как бы генерила исходная, оригинальная модель. Это число от 0 до бесконечности, но на практике больше 2 его, кажется, нет смысла ставить. Чем выше консервативность, тем меньше шансов получить неустойчивую модель. Чем меньше консервативность - тем модель "оригинальнее"
-composition_size - число субмоделей. Если 1, то у нас один резнет, если много, то у нас целый random forest или бустинг из них. Чем выше net dropout rate, тем больше конструкция похожа на random forest, то есть меньше переобучается, чем ниже net dropout rate, тем больше это похоже на бустинг, то есть лучше точность.
-
-Пример чекпоинта tail adapter-а для Llama 3.1 8B 4-bit:
+Example checkpoint of a tail adapter for Llama 3.1 8B 4-bit:
 https://disk.yandex.ru/d/P6cfejgLR0sWpg
-Как всобачить в свою модель: 
-model.lm_head = head
-Где head - это то, что в чекпоинте
+How to attach to your model:
+`model.lm_head = head`
+Where `head` is what's in the checkpoint.
 
-Примеры микродатасетов.
-Это RL-ный датасет, то есть проставлены реворды: https://disk.yandex.ru/d/YkBhPEz32B8f5Q
-А это неRL-ный и не instruct датасет, то есть только строки текста: https://disk.yandex.ru/d/yx3yAffIB01lVw
+Example micro-datasets.
+This is an RL dataset, meaning rewards are assigned: https://disk.yandex.ru/d/YkBhPEz32B8f5Q
+And this is a non-RL and non-instruct dataset, meaning just text strings: https://disk.yandex.ru/d/yx3yAffIB01lVw
 
-
-АПДЕЙТ ОТ 23.03
-Я ещё добавил slider и спекулятивную генерацию. Slider позволяет TEA принимать на вход не оди эмбеддинг, а несколько.
-Но эта логика совершенно несовместима с функцией generate в LLM. Поэтому я написал свою generate - она по дефолту медленнее, зато можно генерить по несколько токенов за раз, то есть в таком случае она наоборот, быстрее. Пример запуска:
+UPDATE FROM 23.03
+I also added a slider and speculative generation. Slider allows TEA to take not one, but several embeddings as input.
+But this logic is completely incompatible with the `generate` function in LLMs. Therefore, I wrote my own `generate` - it's slower by default, but you can generate several tokens at once, meaning in that case, it's actually faster. Example of running it:
 ```
 prompt = "Привет, как дела?"
 inputs = tokenizer(prompt, return_tensors="pt").to(device)
@@ -63,21 +59,21 @@ repetition_penalty = 1.2
 top_k = 10
 
 t = pd.Timestamp.now()
-generate_ids = generate_utils.generate_speculative(model, inputs.input_ids.to(device), 
+generate_ids = generate_utils.generate_speculative(model, inputs.input_ids.to(device),
              slider=None, heavy_lm_head=None,
-             top_p=top_p, temperature=temp, max_new_tokens=max_new_tokens, 
-             pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id, bos_token_id=tokenizer.bos_token_id, 
-             do_sample=True, repetition_penalty=repetition_penalty, early_stopping=False, 
-             tokenizer=tokenizer, stop_strings=None, top_k=top_k, 
+             top_p=top_p, temperature=temp, max_new_tokens=max_new_tokens,
+             pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id, bos_token_id=tokenizer.bos_token_id,
+             do_sample=True, repetition_penalty=repetition_penalty, early_stopping=False,
+             tokenizer=tokenizer, stop_strings=None, top_k=top_k,
              return_dict_in_generate=False, use_cache=True, estimation_rule='0.2')
 print(pd.Timestamp.now() - t)
 answer = tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
 print(answer)
 ```
 
-Апдейт от 20.04
-Встроил адаптер, который сочетает трансформерные слои и резнеты. Трансформерные слои позволяют сделать более репрезентативные эмбеддинги под нашу задачу. Подробности см в tea_transformer_heavyhead.ipynb
+Update from 20.04
+Integrated an adapter that combines transformer layers and resnets. Transformer layers allow for creating more representative embeddings for our task. Details can be found in `tea_transformer_heavyhead.ipynb`.
 
-Апдейт от 27.05
-Добавил сценарий tea_full_caches.ipynb. Это сценарий с кешированием. Можно отключить обучение трансформерного адаптера (поставить ['transformer_update_rate'] = 0) после того, как он в какой-то мере уже обучился. Затем включить режим cache_mode = 'only_cache'. У вас появятся кеши с парами эмбеддинг-лейбл. Потом можно поставить cache_mode = 'train_from_cache' - и тогда мы получим гораздо более скоростное обучение. Смысл здесь в том, что иногда вам надо поэкспериментировать с разными архитектурами адаптера, но на одном датасете. И надо провести много таких экспериментов быстро.
-Режим cache_mode = 'only_train' - это обучение, как и раньше.
+Update from 27.05
+Added the script `tea_full_caches.ipynb`. This is a caching scenario. You can disable training of the transformer adapter (set `['transformer_update_rate'] = 0`) after it has already been trained to some extent. Then enable the mode `cache_mode = 'only_cache'`. You will get caches with embedding-label pairs. Then you can set `cache_mode = 'train_from_cache'` - and then we get much faster training. The point here is that sometimes you need to experiment with different adapter architectures, but on the same dataset. And you need to conduct many such experiments quickly.
+The mode `cache_mode = 'only_train'` is training as before.
