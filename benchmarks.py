@@ -485,7 +485,7 @@ At the entrance, an inscription read:
                 aggregated["translation"]["count"] += 1
             # В цикле обработки результатов:
             elif type_ == "reasoning":
-                aggregated["reasoning"]["total"] += score if isinstance(score, (int, float)) else 0
+                aggregated["reasoning"]["total"] += score + 0.
                 aggregated["reasoning"]["count"] += 1.
         
 
